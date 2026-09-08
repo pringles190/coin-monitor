@@ -1,5 +1,5 @@
 // 앱 셸만 캐시. 업비트 API 응답은 절대 캐시하지 않음(항상 네트워크).
-const CACHE = "coin-monitor-v3";
+const CACHE = "coin-monitor-v4";
 const SHELL = [
   "./index.html",
   "./manifest.webmanifest",
