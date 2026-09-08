@@ -2,8 +2,8 @@
 
 관심 코인의 가격·거래량을 한 화면에서 실시간 모니터링하는 웹앱(PWA).
 
-- 가격 변동률 + 거래량 추이(코인별 비교: 평균 대비 배수 / 원화 로그)를 한 화면에
-- 시세 2초 폴링, 캔들 히스토리 90초 갱신
+- **대시보드**: 가격 변동률 + 거래량 추이(코인별 비교), 시세 2초 폴링, 캔들 90초 갱신
+- **뉴스**: 국내·해외 암호화폐 뉴스 모음 (RSS, 15분 캐시). API 키가 있으면 AI 2문장 요약
 - 관심 코인 추가/삭제, 기간 전환(1H/4H/1D/1W/1M), 다크/라이트 자동
 - PWA: 폰에서 "홈 화면에 추가" → 앱처럼 전체화면 실행
 
@@ -29,6 +29,19 @@
 나온 `https://<이름>.workers.dev` 주소를 대시보드 **[설정]**에 입력.
 (폰에서는 편집기가 코드를 망가뜨리니 PC에서 할 것.)
 
+## 뉴스 페이지
+
+`/news` 엔드포인트가 RSS를 모아 JSON으로 돌려준다. 소스: 블록미디어·토큰포스트·
+Cointelegraph·CoinDesk·Decrypt·The Block·구글 뉴스(국내). 3일 이내 기사, 15분 캐시.
+
+- **현재 구현: `worker.js` (Cloudflare Worker)만.** Pages/Deno/Vercel용은 아직 없음.
+- 키 없으면 헤드라인 + 발췌문만 표시.
+- **AI 요약(선택)**: Worker의 Settings → Variables 에
+  `ANTHROPIC_API_KEY` (console.anthropic.com 발급) 추가 → 한국어 2문장 요약 + 코인 태그.
+  모델 기본 `claude-haiku-4-5`, `NEWS_MODEL` 로 변경 가능.
+  비용은 [Anthropic API](https://console.anthropic.com) 별도 과금 (Claude Pro 구독과 무관).
+  Haiku + 15분 캐시 기준 실제 열람량에 따라 하루 수십~수백 원 수준.
+
 ## 로컬 실행
 
 ```bash
@@ -44,7 +57,7 @@ python -m http.server 8777
 | `functions/api/[[path]].js` | Cloudflare Pages Function 프록시 |
 | `main.ts` | Deno Deploy 엔트리포인트 (정적 + 프록시) |
 | `api/[...path].js` | Vercel Serverless Function 프록시 |
-| `worker.js` | 독립형 Cloudflare Worker 프록시 |
+| `worker.js` | 독립형 Cloudflare Worker 프록시 + `/news` (뉴스 모음·AI 요약) |
 | `manifest.webmanifest`, `sw.js`, `icon-*.png` | PWA |
 
 ## 참고
