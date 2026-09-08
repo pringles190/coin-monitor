@@ -181,6 +181,15 @@ function apiBase() {
 function isLocal() {
   return /^(localhost|127\.|\[?::1\]?$)/.test(location.hostname) || location.protocol === "file:";
 }
+// 배포됐는데 프록시(/api 또는 사용자 지정)가 없어 데이터를 못 받는 상황이면 설정 패널을 연다.
+function maybePromptProxy() {
+  if (!state.proxy && !isLocal()) {
+    $("cfgPanel").hidden = false;
+    showErr("데이터를 불러오지 못했습니다. Cloudflare Pages(/api)가 아니라면 [설정]에 프록시(Worker) 주소를 입력하세요.");
+    return true;
+  }
+  return false;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -284,7 +293,7 @@ async function rebuild() {
     state.candles = got;
     clearErr();
   } catch (e) {
-    showErr("캔들 로드 실패: " + e.message + " — /api 중계가 배포됐는지 확인하세요.");
+    if (!maybePromptProxy()) showErr("캔들 로드 실패: " + e.message);
     return;
   }
 
@@ -497,6 +506,7 @@ async function pollOnce() {
     clearErr();
   } catch (e) {
     setStatus("err", "연결 오류");
+    maybePromptProxy();
   }
 }
 function startPolling() {
@@ -599,7 +609,7 @@ if ("serviceWorker" in navigator) {
   $("refresh").onclick = () => { fetchTickers().catch(() => {}); rebuild(); };
 
   try { await loadMarkets(); }
-  catch (e) { showErr("마켓 목록 로드 실패: " + e.message); }
+  catch (e) { if (!maybePromptProxy()) showErr("마켓 목록 로드 실패: " + e.message); }
   await fetchTickers().catch(() => {});
   await rebuild();
   startPolling();
