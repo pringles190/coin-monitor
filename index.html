@@ -66,7 +66,14 @@
     .chip { background: #fff; border-color: #dde1e6; }
     th, td { border-color: #eaecef; }
     .muted, .card h2, th { color: #6b7280; }
+    .seg button { background: #fff; color: #333; border-color: #d7dbe0; }
   }
+  .card h2 { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+  .seg button {
+    background: #1a1f29; color: #cfd4de; border: 1px solid #2b313d; border-radius: 6px;
+    padding: 3px 8px; font-size: 11px; cursor: pointer; font-weight: 400;
+  }
+  .seg button.active { background: #2563eb; border-color: #2563eb; color: #fff; }
 </style>
 </head>
 <body>
@@ -91,6 +98,11 @@
   <div class="card">
     <h2>구간 변동률 (%) — 선택한 기간 시작점 대비</h2>
     <div class="chartbox"><canvas id="priceChart"></canvas></div>
+  </div>
+
+  <div class="card">
+    <h2>거래량 추이 — 구간별 거래대금 <span class="seg" id="volToggle"></span></h2>
+    <div class="chartbox"><canvas id="volTrendChart"></canvas></div>
   </div>
 
   <div class="card">
@@ -132,12 +144,14 @@ const state = {
   nameByMarket: new Map(),   // 마켓코드 -> 한글이름
   watch: [...DEFAULT_WATCH],
   tf: "1D",
+  volMode: "mult",           // 거래량 추이 모드: "mult"(평균 대비 배수) | "krw"(절대·로그)
   color: {},                 // 마켓코드 -> 색
-  candles: {},               // 마켓코드 -> [{t, close}]
+  candles: {},               // 마켓코드 -> [{t, close, value}]
   base: {},                  // 마켓코드 -> 기준가
   live: {},                  // 마켓코드 -> {trade_price, signed_change_rate, acc_trade_price_24h}
   timeline: [],              // 통합 타임스탬프 배열
   priceChart: null,
+  volTrendChart: null,
   volChart: null,
   ws: null,
   renderQueued: false,
@@ -176,7 +190,9 @@ function assignColors() {
 }
 function persist() {
   try {
-    localStorage.setItem("upbit-dash", JSON.stringify({ watch: state.watch, tf: state.tf }));
+    localStorage.setItem("upbit-dash", JSON.stringify({
+      watch: state.watch, tf: state.tf, volMode: state.volMode,
+    }));
   } catch (e) {}
 }
 function restore() {
@@ -184,6 +200,7 @@ function restore() {
     const s = JSON.parse(localStorage.getItem("upbit-dash") || "{}");
     if (Array.isArray(s.watch) && s.watch.length) state.watch = s.watch;
     if (TF[s.tf]) state.tf = s.tf;
+    if (s.volMode === "mult" || s.volMode === "krw") state.volMode = s.volMode;
   } catch (e) {}
 }
 
@@ -211,7 +228,11 @@ async function fetchCandles(market) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(market + " HTTP " + r.status);
   const arr = await r.json();
-  return arr.reverse().map(c => ({ t: c.timestamp, close: c.trade_price }));
+  return arr.reverse().map(c => ({
+    t: c.timestamp,
+    close: c.trade_price,
+    value: c.candle_acc_trade_price,  // 해당 구간 거래대금(원)
+  }));
 }
 
 async function fetchTickers() {
@@ -259,6 +280,7 @@ async function rebuild() {
   });
 
   renderPriceChart(labels, datasets);
+  renderVolTrend(labels);
   renderChips();
   applyLive();
 }
@@ -292,6 +314,81 @@ function renderPriceChart(labels, datasets) {
         y: { ticks: { color: tickColor(), callback: (v) => v + "%" }, grid: { color: gridColor() } },
       },
     },
+  });
+}
+
+// 코인별 거래량(구간 거래대금) 추이. 코인 간 규모 차이가 커서
+// 기본은 "각 코인의 구간 평균 대비 배수"로 정규화해 비교 가능하게 표시.
+function renderVolTrend(labels) {
+  const mult = state.volMode === "mult";
+
+  const series = state.watch.map(m => {
+    const map = new Map((state.candles[m] || []).map(c => [c.t, c.value]));
+    const vals = (state.candles[m] || []).map(c => c.value).filter(v => v > 0);
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+    const rawKRW = state.timeline.map(t => (map.has(t) ? map.get(t) : null));
+    const data = rawKRW.map(v => v == null ? null : (mult ? (avg ? v / avg : null) : v));
+    return {
+      label: nameOf(m), market: m, data, rawKRW,
+      borderColor: state.color[m], backgroundColor: "transparent",
+      borderWidth: 2, pointRadius: 0, tension: 0.15, spanGaps: true,
+    };
+  });
+
+  const datasets = mult
+    ? [{
+        label: "평균(1x)", data: state.timeline.map(() => 1), _ref: true,
+        borderColor: "rgba(148,163,184,0.55)", borderWidth: 1, borderDash: [4, 4],
+        pointRadius: 0, spanGaps: true,
+      }, ...series]
+    : series;
+
+  if (state.volTrendChart) state.volTrendChart.destroy();
+  state.volTrendChart = new Chart($("volTrendChart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          filter: (item) => !item.dataset._ref,
+          callbacks: {
+            label: (c) => {
+              const raw = c.dataset.rawKRW ? c.dataset.rawKRW[c.dataIndex] : null;
+              if (mult) {
+                return c.dataset.label + ": " +
+                  (c.parsed.y == null ? "-" : c.parsed.y.toFixed(2) + "x") +
+                  (raw ? " (" + fmtKRW(raw) + "원)" : "");
+              }
+              return c.dataset.label + ": " + (raw ? fmtKRW(raw) + "원" : "-");
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8, color: tickColor() }, grid: { color: gridColor() } },
+        y: mult
+          ? { beginAtZero: true, ticks: { color: tickColor(), callback: (v) => v + "x" }, grid: { color: gridColor() } }
+          : { type: "logarithmic", ticks: { color: tickColor(), callback: (v) => fmtKRW(v) }, grid: { color: gridColor() } },
+      },
+    },
+  });
+}
+
+function buildVolToggle() {
+  const opts = [["mult", "평균 대비 배수"], ["krw", "원화(로그)"]];
+  $("volToggle").innerHTML = opts.map(([k, t]) =>
+    '<button data-v="' + k + '"' + (k === state.volMode ? ' class="active"' : "") + ">" + t + "</button>"
+  ).join("");
+  $("volToggle").querySelectorAll("button").forEach(b => {
+    b.onclick = () => {
+      state.volMode = b.dataset.v;
+      persist();
+      buildVolToggle();
+      renderVolTrend(state.timeline.map(fmtTime));
+    };
   });
 }
 
@@ -434,6 +531,7 @@ function removeCoin(m) {
   state.watch = state.watch.filter(x => x !== m);
   persist(); assignColors();
   if (state.volChart) { state.volChart.destroy(); state.volChart = null; }
+  if (state.volTrendChart) { state.volTrendChart.destroy(); state.volTrendChart = null; }
   rebuild(); connectWs();
 }
 
@@ -457,6 +555,7 @@ if ("serviceWorker" in navigator) {
 (async function init() {
   restore();
   buildTfBar();
+  buildVolToggle();
   assignColors();
   renderChips();
   try { await loadMarkets(); }
