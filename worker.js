@@ -1,71 +1,34 @@
-/**
- * 업비트 API CORS 프록시 — Cloudflare Worker
- *
- * 브라우저에서 api.upbit.com 을 직접 호출하면 CORS 로 차단된다.
- * 이 Worker 가 서버 사이드에서 대신 호출하고 CORS 헤더를 붙여 돌려준다.
- *
- * 배포 (CLI 불필요):
- *   1. https://dash.cloudflare.com → Workers & Pages → Create → Worker
- *   2. 이름 정하고 Deploy → Edit code → 이 파일 내용 전체 붙여넣기 → Deploy
- *   3. 나온 주소(https://<이름>.<계정>.workers.dev)를 대시보드 [설정] 에 입력
- *
- * 원한다면 ALLOW_ORIGIN 을 본인 페이지 주소로 좁혀도 된다.
- */
+// 업비트 API CORS 프록시 (Cloudflare Worker)
+//
+// 배포: dash.cloudflare.com → Workers & Pages → Create → Workers → "Hello World"
+//   1. 편집기 안을 클릭 → Ctrl+A (전체 선택) → Delete (전부 지우기)
+//   2. 이 파일 내용을 붙여넣기 → Deploy
+//   3. 주소(https://<이름>.<계정>.workers.dev)를 대시보드 [설정]에 입력
 
-const UPBIT = "https://api.upbit.com";
-const ALLOW_ORIGIN = "*"; // 예: "https://pringles190.github.io"
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "*",
+  "Cache-Control": "no-store",
+};
 
 export default {
   async fetch(request) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
+      return new Response(null, { headers: CORS });
     }
-    if (request.method !== "GET") {
-      return new Response("Method Not Allowed", { status: 405, headers: corsHeaders() });
-    }
-    // /v1/* 경로만 업비트로 전달 (그 외에는 헬스 체크)
     if (!url.pathname.startsWith("/v1/")) {
-      return new Response("upbit proxy ok", { headers: corsHeaders() });
+      return new Response("upbit proxy ok", { headers: CORS });
     }
 
-    const target = UPBIT + url.pathname + url.search;
-    let upstream;
-    try {
-      upstream = await fetch(target, {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        cf: { cacheTtl: 0, cacheEverything: false },
-      });
-    } catch (err) {
-      return json({ error: "upstream_fetch_failed", detail: String(err) }, 502);
-    }
+    const upstream = await fetch("https://api.upbit.com" + url.pathname + url.search, {
+      headers: { Accept: "application/json" },
+    });
 
-    const body = await upstream.arrayBuffer();
-    const headers = corsHeaders();
+    const headers = new Headers(CORS);
     headers.set("Content-Type", upstream.headers.get("Content-Type") || "application/json");
-    // 업비트 레이트리밋 헤더도 그대로 전달
-    for (const k of ["Remaining-Req", "Retry-After"]) {
-      const v = upstream.headers.get(k);
-      if (v) headers.set(k, v);
-    }
-    return new Response(body, { status: upstream.status, headers });
+    return new Response(upstream.body, { status: upstream.status, headers });
   },
 };
-
-function corsHeaders() {
-  const h = new Headers();
-  h.set("Access-Control-Allow-Origin", ALLOW_ORIGIN);
-  h.set("Access-Control-Allow-Methods", "GET, OPTIONS");
-  h.set("Access-Control-Allow-Headers", "*");
-  h.set("Access-Control-Max-Age", "86400");
-  h.set("Cache-Control", "no-store");
-  return h;
-}
-
-function json(obj, status) {
-  const h = corsHeaders();
-  h.set("Content-Type", "application/json");
-  return new Response(JSON.stringify(obj), { status: status || 200, headers: h });
-}
