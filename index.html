@@ -91,8 +91,9 @@
   <div class="card" id="cfgPanel" hidden>
     <h2>설정</h2>
     <p class="muted" style="margin:0 0 8px">
-      기본적으로 같은 도메인의 <code>/api</code>(Cloudflare Pages Function)를 거쳐 업비트를 호출합니다.
-      별도 프록시(Worker 등)를 쓰려면 아래에 그 주소를 입력하세요. 비워두면 기본값을 사용합니다.
+      업비트 API는 브라우저에서 직접 못 부릅니다(CORS). 비워두면 공개 프록시로 폴백하는데
+      느리거나 끊길 수 있어요. 본인 프록시(Cloudflare Worker / Deno Deploy / Vercel) 주소를
+      넣으면 안정적입니다. <code>*.pages.dev</code>·<code>*.vercel.app</code>에 올렸다면 자동으로 <code>/api</code>를 씁니다.
     </p>
     <div class="add">
       <input id="proxyInput" placeholder="https://coin-proxy.xxxx.workers.dev" style="width:min(360px,70vw)" />
@@ -170,22 +171,28 @@ const state = {
 };
 
 // 업비트 API 호출 base.
-//  - 설정에서 프록시 URL을 직접 넣었으면 그것
-//  - 로컬 실행이면 api.upbit.com 직접 호출
-//  - 그 외(배포)에는 같은 도메인의 /api (Cloudflare Pages Function이 업비트로 중계)
-function apiBase() {
-  if (state.proxy) return state.proxy.replace(/\/+$/, "");
-  if (isLocal()) return "https://api.upbit.com";
-  return "/api";
+// 업비트 API 요청 URL 구성. path 예: "/v1/ticker?markets=KRW-BTC"
+//  1. [설정]에서 프록시를 직접 지정 → 그 주소 + path
+//  2. 로컬 실행 → api.upbit.com 직접
+//  3. deno.dev / pages.dev / vercel.app / netlify.app → 같은 도메인 /api (내장 중계)
+//  4. 그 외(GitHub Pages 등) → 프록시 없음. [설정]에서 지정해야 함
+const SELF_PROXY_HOSTS = /\.(deno\.dev|pages\.dev|vercel\.app|netlify\.app)$/;
+function hasProxy() {
+  return !!state.proxy || isLocal() || SELF_PROXY_HOSTS.test(location.hostname);
+}
+function apiUrl(path) {
+  if (state.proxy) return state.proxy.replace(/\/+$/, "") + path;
+  if (isLocal()) return "https://api.upbit.com" + path;
+  return location.origin + "/api" + path; // 자체 호스트(deno/pages/vercel)
 }
 function isLocal() {
   return /^(localhost|127\.|\[?::1\]?$)/.test(location.hostname) || location.protocol === "file:";
 }
-// 배포됐는데 프록시(/api 또는 사용자 지정)가 없어 데이터를 못 받는 상황이면 설정 패널을 연다.
+// 프록시가 없어 데이터를 못 받는 상황이면 설정 패널을 열고 안내.
 function maybePromptProxy() {
-  if (!state.proxy && !isLocal()) {
+  if (!hasProxy()) {
     $("cfgPanel").hidden = false;
-    showErr("데이터를 불러오지 못했습니다. Cloudflare Pages(/api)가 아니라면 [설정]에 프록시(Worker) 주소를 입력하세요.");
+    showErr("업비트 API는 브라우저에서 직접 못 부릅니다(CORS). [설정]에 본인 프록시 주소를 입력하세요.");
     return true;
   }
   return false;
@@ -240,7 +247,7 @@ function restore() {
 }
 
 async function loadMarkets() {
-  const r = await fetch(apiBase() + "/v1/market/all?isDetails=false");
+  const r = await fetch(apiUrl("/v1/market/all?isDetails=false"));
   if (!r.ok) throw new Error("HTTP " + r.status);
   const arr = await r.json();
   const dl = $("mktList");
@@ -259,7 +266,7 @@ async function loadMarkets() {
 
 async function fetchCandles(market) {
   const tf = TF[state.tf];
-  const url = apiBase() + "/v1/candles/" + tf.path + "?market=" + market + "&count=" + tf.count;
+  const url = apiUrl("/v1/candles/" + tf.path + "?market=" + market + "&count=" + tf.count);
   const r = await fetch(url);
   if (!r.ok) throw new Error(market + " HTTP " + r.status);
   const arr = await r.json();
@@ -272,7 +279,7 @@ async function fetchCandles(market) {
 
 async function fetchTickers() {
   if (!state.watch.length) return;
-  const r = await fetch(apiBase() + "/v1/ticker?markets=" + state.watch.join(","));
+  const r = await fetch(apiUrl("/v1/ticker?markets=" + state.watch.join(",")));
   if (!r.ok) throw new Error("ticker HTTP " + r.status);
   const arr = await r.json();
   for (const t of arr) {
@@ -496,17 +503,21 @@ function setStatus(kind, text) {
   $("cstat").textContent = text;
 }
 
-// 시세는 2초마다 REST 폴링 (WebSocket 대신 — 프록시 경유가 단순함)
+// 시세 REST 폴링 (WebSocket 대신). 이전 요청이 안 끝났으면 건너뜀.
+let pollBusy = false;
 async function pollOnce() {
-  if (!state.watch.length) return;
+  if (!state.watch.length || pollBusy) return;
+  pollBusy = true;
   try {
     await fetchTickers();
     applyLive();
-    setStatus("ok", "실시간 (2초 폴링)");
+    setStatus("ok", "실시간");
     clearErr();
   } catch (e) {
     setStatus("err", "연결 오류");
     maybePromptProxy();
+  } finally {
+    pollBusy = false;
   }
 }
 function startPolling() {
@@ -552,7 +563,8 @@ function refreshProxyState() {
   if (!el) return;
   if (state.proxy) el.textContent = "현재: 사용자 지정 프록시 (" + state.proxy + ")";
   else if (isLocal()) el.textContent = "현재: 로컬 — api.upbit.com 직접 호출";
-  else el.textContent = "현재: /api 내장 중계 사용";
+  else if (SELF_PROXY_HOSTS.test(location.hostname)) el.textContent = "현재: 같은 도메인 /api 중계";
+  else el.textContent = "현재: 프록시 없음 — 주소를 입력해야 데이터가 뜹니다";
 }
 
 function setupCfg() {
@@ -607,6 +619,8 @@ if ("serviceWorker" in navigator) {
   $("addBtn").onclick = addCoin;
   $("addInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addCoin(); });
   $("refresh").onclick = () => { fetchTickers().catch(() => {}); rebuild(); };
+
+  if (maybePromptProxy()) { setStatus("err", "프록시 필요"); return; }
 
   try { await loadMarkets(); }
   catch (e) { if (!maybePromptProxy()) showErr("마켓 목록 로드 실패: " + e.message); }
