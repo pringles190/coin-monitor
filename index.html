@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>업비트 관심코인 모니터</title>
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="theme-color" content="#0f1115" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="코인모니터" />
+<link rel="apple-touch-icon" href="icon-180.png" />
+<link rel="icon" type="image/png" href="icon-192.png" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
+    background: #0f1115; color: #e7e9ee;
+  }
+  a { color: inherit; }
+  header {
+    padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px 16px;
+    align-items: center; border-bottom: 1px solid #262b35;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #6b7280; }
+  .dot.ok { background: #22c55e; } .dot.warn { background: #f59e0b; } .dot.err { background: #ef4444; }
+  .muted { color: #8b93a1; font-size: 12px; }
+  .tf button, .bar button {
+    background: #1a1f29; color: #cfd4de; border: 1px solid #2b313d; border-radius: 7px;
+    padding: 5px 10px; font-size: 12px; cursor: pointer; margin-right: 4px;
+  }
+  .tf button.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .wrap { padding: 12px 16px 40px; max-width: 1100px; margin: 0 auto; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; background: #1a1f29;
+    border: 1px solid #2b313d; border-radius: 999px; padding: 4px 8px 4px 10px; font-size: 12px;
+  }
+  .chip .cdot { width: 9px; height: 9px; border-radius: 50%; }
+  .chip button { background: none; border: none; color: #8b93a1; cursor: pointer; font-size: 13px; padding: 0 2px; }
+  .add { display: flex; gap: 6px; margin: 8px 0 16px; }
+  .add input {
+    background: #12161e; color: #e7e9ee; border: 1px solid #2b313d; border-radius: 7px;
+    padding: 6px 9px; font-size: 13px; width: 220px;
+  }
+  .add button { background: #2563eb; color: #fff; border: none; border-radius: 7px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  .card { background: #12161e; border: 1px solid #222835; border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
+  .card h2 { font-size: 12px; margin: 0 0 8px; color: #9aa2b1; font-weight: 600; }
+  .chartbox { position: relative; height: 340px; }
+  .volbox { position: relative; height: 200px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid #1e242f; white-space: nowrap; }
+  th { color: #8b93a1; font-weight: 600; }
+  td.name, th.name { text-align: left; }
+  .up { color: #22c55e; } .down { color: #ef4444; }
+  #err { display: none; background: #3b1f1f; border: 1px solid #7f1d1d; color: #fecaca; padding: 8px 12px; border-radius: 8px; font-size: 12px; margin: 10px 0; }
+  @media (prefers-color-scheme: light) {
+    body { background: #f6f7f9; color: #1a1c22; }
+    header { border-color: #e3e6ea; }
+    .tf button, .bar button { background: #fff; color: #333; border-color: #d7dbe0; }
+    .card, .add input { background: #fff; border-color: #e3e6ea; }
+    .chip { background: #fff; border-color: #dde1e6; }
+    th, td { border-color: #eaecef; }
+    .muted, .card h2, th { color: #6b7280; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>업비트 관심코인 모니터</h1>
+  <span><span id="cdot" class="dot"></span> <span id="cstat" class="muted">연결 중…</span></span>
+  <span class="muted" id="updated"></span>
+  <span class="tf" id="tfbar" style="margin-left:auto"></span>
+  <span class="bar"><button id="refresh">새로고침</button></span>
+</header>
+
+<div class="wrap">
+  <div id="err"></div>
+
+  <div class="add">
+    <input id="addInput" list="mktList" placeholder="코인 이름 (예: 비트코인)" />
+    <datalist id="mktList"></datalist>
+    <button id="addBtn">추가</button>
+  </div>
+  <div class="chips" id="chips"></div>
+
+  <div class="card">
+    <h2>구간 변동률 (%) — 선택한 기간 시작점 대비</h2>
+    <div class="chartbox"><canvas id="priceChart"></canvas></div>
+  </div>
+
+  <div class="card">
+    <h2>24시간 누적 거래대금 (원)</h2>
+    <div class="volbox"><canvas id="volChart"></canvas></div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th class="name">코인</th><th>현재가</th><th>전일대비</th>
+        <th>구간 변동</th><th>24h 거래대금</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <p class="muted">
+    데이터: 업비트 공개 API · 시세는 WebSocket 실시간, 캔들은 90초마다 갱신 ·
+    <code>file://</code>로 열어 데이터가 안 뜨면 로컬 서버로 실행하세요.
+  </p>
+</div>
+
+<script>
+"use strict";
+
+const DEFAULT_WATCH = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"];
+const PALETTE = ["#4f9cff","#22c55e","#f59e0b","#ef4444","#a855f7","#14b8a6","#ec4899","#eab308","#38bdf8","#f97316"];
+const TF = {
+  "1H": { path: "minutes/1",   count: 60 },
+  "4H": { path: "minutes/5",   count: 48 },
+  "1D": { path: "minutes/30",  count: 48 },
+  "1W": { path: "minutes/240", count: 42 },
+  "1M": { path: "days",        count: 30 },
+};
+
+const state = {
+  marketsByName: new Map(),  // 표시이름 -> 마켓코드
+  nameByMarket: new Map(),   // 마켓코드 -> 한글이름
+  watch: [...DEFAULT_WATCH],
+  tf: "1D",
+  color: {},                 // 마켓코드 -> 색
+  candles: {},               // 마켓코드 -> [{t, close}]
+  base: {},                  // 마켓코드 -> 기준가
+  live: {},                  // 마켓코드 -> {trade_price, signed_change_rate, acc_trade_price_24h}
+  timeline: [],              // 통합 타임스탬프 배열
+  priceChart: null,
+  volChart: null,
+  ws: null,
+  renderQueued: false,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function showErr(msg) { const e = $("err"); e.textContent = msg; e.style.display = "block"; }
+function clearErr() { $("err").style.display = "none"; }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function nameOf(m) { return state.nameByMarket.get(m) || m.replace("KRW-", ""); }
+
+function fmtKRW(n) {
+  if (n == null || isNaN(n)) return "-";
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + "조";
+  if (n >= 1e8)  return (n / 1e8).toFixed(1) + "억";
+  if (n >= 1e4)  return Math.round(n / 1e4) + "만";
+  return Math.round(n).toLocaleString();
+}
+function fmtPrice(n) {
+  if (n == null || isNaN(n)) return "-";
+  if (n >= 1000) return Math.round(n).toLocaleString();
+  if (n >= 1)    return n.toFixed(1);
+  return n.toFixed(4);
+}
+function fmtTime(ts) {
+  const d = new Date(ts);
+  if (state.tf === "1W" || state.tf === "1M") return (d.getMonth() + 1) + "/" + d.getDate();
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+function assignColors() {
+  state.color = {};
+  state.watch.forEach((m, i) => { state.color[m] = PALETTE[i % PALETTE.length]; });
+}
+function persist() {
+  try {
+    localStorage.setItem("upbit-dash", JSON.stringify({ watch: state.watch, tf: state.tf }));
+  } catch (e) {}
+}
+function restore() {
+  try {
+    const s = JSON.parse(localStorage.getItem("upbit-dash") || "{}");
+    if (Array.isArray(s.watch) && s.watch.length) state.watch = s.watch;
+    if (TF[s.tf]) state.tf = s.tf;
+  } catch (e) {}
+}
+
+async function loadMarkets() {
+  const r = await fetch("https://api.upbit.com/v1/market/all?isDetails=false");
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const arr = await r.json();
+  const dl = $("mktList");
+  dl.innerHTML = "";
+  for (const m of arr) {
+    if (!m.market.startsWith("KRW-")) continue;
+    state.nameByMarket.set(m.market, m.korean_name);
+    const label = m.korean_name + " (" + m.market + ")";
+    state.marketsByName.set(label, m.market);
+    state.marketsByName.set(m.korean_name, m.market);
+    const o = document.createElement("option");
+    o.value = label;
+    dl.appendChild(o);
+  }
+}
+
+async function fetchCandles(market) {
+  const tf = TF[state.tf];
+  const url = "https://api.upbit.com/v1/candles/" + tf.path + "?market=" + market + "&count=" + tf.count;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(market + " HTTP " + r.status);
+  const arr = await r.json();
+  return arr.reverse().map(c => ({ t: c.timestamp, close: c.trade_price }));
+}
+
+async function fetchTickers() {
+  if (!state.watch.length) return;
+  const r = await fetch("https://api.upbit.com/v1/ticker?markets=" + state.watch.join(","));
+  if (!r.ok) return;
+  const arr = await r.json();
+  for (const t of arr) {
+    state.live[t.market] = {
+      trade_price: t.trade_price,
+      signed_change_rate: t.signed_change_rate,
+      acc_trade_price_24h: t.acc_trade_price_24h,
+    };
+  }
+}
+
+async function rebuild() {
+  if (!state.watch.length) { renderChips(); return; }
+  assignColors();
+  try {
+    const got = {};
+    for (const m of state.watch) { got[m] = await fetchCandles(m); await sleep(110); }
+    state.candles = got;
+    clearErr();
+  } catch (e) {
+    showErr("캔들 로드 실패: " + e.message + " — 로컬 서버로 실행 중인지 확인하세요.");
+    return;
+  }
+
+  const tsSet = new Set();
+  for (const m of state.watch) state.candles[m].forEach(c => tsSet.add(c.t));
+  state.timeline = [...tsSet].sort((a, b) => a - b);
+  const labels = state.timeline.map(fmtTime);
+
+  const datasets = state.watch.map(m => {
+    const map = new Map(state.candles[m].map(c => [c.t, c.close]));
+    const base = state.candles[m][0] ? state.candles[m][0].close : null;
+    state.base[m] = base;
+    const data = state.timeline.map(t => (map.has(t) && base) ? (map.get(t) / base - 1) * 100 : null);
+    return {
+      label: nameOf(m), market: m, data,
+      borderColor: state.color[m], backgroundColor: "transparent",
+      borderWidth: 2, pointRadius: 0, tension: 0.15, spanGaps: true,
+    };
+  });
+
+  renderPriceChart(labels, datasets);
+  renderChips();
+  applyLive();
+}
+
+function gridColor() {
+  return matchMedia("(prefers-color-scheme: light)").matches ? "#eceef1" : "#1e242f";
+}
+function tickColor() {
+  return matchMedia("(prefers-color-scheme: light)").matches ? "#6b7280" : "#8b93a1";
+}
+
+function renderPriceChart(labels, datasets) {
+  if (state.priceChart) state.priceChart.destroy();
+  state.priceChart = new Chart($("priceChart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (c) => c.dataset.label + ": " + (c.parsed.y >= 0 ? "+" : "") +
+              (c.parsed.y == null ? "-" : c.parsed.y.toFixed(2)) + "%",
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8, color: tickColor() }, grid: { color: gridColor() } },
+        y: { ticks: { color: tickColor(), callback: (v) => v + "%" }, grid: { color: gridColor() } },
+      },
+    },
+  });
+}
+
+function renderVolChart() {
+  const labels = state.watch.map(nameOf);
+  const data = state.watch.map(m => state.live[m] ? state.live[m].acc_trade_price_24h : 0);
+  const colors = state.watch.map(m => state.color[m]);
+  if (!state.volChart) {
+    state.volChart = new Chart($("volChart"), {
+      type: "bar",
+      data: { labels, datasets: [{ data, backgroundColor: colors }] },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: (c) => fmtKRW(c.parsed.y) + " 원" } },
+        },
+        scales: {
+          x: { ticks: { color: tickColor() }, grid: { display: false } },
+          y: { ticks: { color: tickColor(), callback: (v) => fmtKRW(v) }, grid: { color: gridColor() } },
+        },
+      },
+    });
+  } else {
+    state.volChart.data.labels = labels;
+    state.volChart.data.datasets[0].data = data;
+    state.volChart.data.datasets[0].backgroundColor = colors;
+    state.volChart.update("none");
+  }
+}
+
+function renderTable() {
+  const rows = state.watch.map(m => {
+    const l = state.live[m] || {};
+    const base = state.base[m];
+    const seg = (base && l.trade_price) ? (l.trade_price / base - 1) * 100 : null;
+    const chg = l.signed_change_rate != null ? l.signed_change_rate * 100 : null;
+    const cls = (v) => v == null ? "" : (v >= 0 ? "up" : "down");
+    const sign = (v) => v == null ? "-" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+    return "<tr>" +
+      '<td class="name"><span class="cdot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' +
+        state.color[m] + ';margin-right:6px"></span>' + nameOf(m) + "</td>" +
+      "<td>" + fmtPrice(l.trade_price) + "</td>" +
+      '<td class="' + cls(chg) + '">' + sign(chg) + "</td>" +
+      '<td class="' + cls(seg) + '">' + sign(seg) + "</td>" +
+      "<td>" + fmtKRW(l.acc_trade_price_24h) + "</td>" +
+      "</tr>";
+  });
+  $("tbody").innerHTML = rows.join("");
+}
+
+function applyLive() {
+  if (state.priceChart) {
+    const lastIdx = state.timeline.length - 1;
+    for (const ds of state.priceChart.data.datasets) {
+      const l = state.live[ds.market];
+      const base = state.base[ds.market];
+      if (l && base && lastIdx >= 0) ds.data[lastIdx] = (l.trade_price / base - 1) * 100;
+    }
+    state.priceChart.update("none");
+  }
+  renderVolChart();
+  renderTable();
+  const d = new Date();
+  $("updated").textContent = "갱신 " + d.toLocaleTimeString("ko-KR");
+}
+
+function scheduleRender() {
+  if (state.renderQueued) return;
+  state.renderQueued = true;
+  setTimeout(() => { state.renderQueued = false; applyLive(); }, 300);
+}
+
+function setStatus(kind, text) {
+  $("cdot").className = "dot " + kind;
+  $("cstat").textContent = text;
+}
+
+function connectWs() {
+  if (state.ws) { try { state.ws.close(); } catch (e) {} }
+  if (!state.watch.length) return;
+  const ws = new WebSocket("wss://api.upbit.com/websocket/v1");
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    ws.send(JSON.stringify([
+      { ticket: "coin-dash-" + Date.now() },
+      { type: "ticker", codes: state.watch },
+      { format: "DEFAULT" },
+    ]));
+    setStatus("ok", "실시간 연결됨");
+  };
+  ws.onmessage = async (ev) => {
+    let text;
+    try {
+      text = (ev.data instanceof Blob) ? await ev.data.text() : new TextDecoder().decode(ev.data);
+    } catch (e) { return; }
+    let d;
+    try { d = JSON.parse(text); } catch (e) { return; }
+    if (d.status === "UP") return;
+    if (d.type === "ticker" && d.code) {
+      state.live[d.code] = {
+        trade_price: d.trade_price,
+        signed_change_rate: d.signed_change_rate,
+        acc_trade_price_24h: d.acc_trade_price_24h,
+      };
+      scheduleRender();
+    }
+  };
+  ws.onclose = () => { setStatus("warn", "재연결 중…"); setTimeout(connectWs, 3000); };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  state.ws = ws;
+}
+
+function renderChips() {
+  $("chips").innerHTML = state.watch.map(m =>
+    '<span class="chip"><span class="cdot" style="background:' + state.color[m] + '"></span>' +
+    nameOf(m) + ' <button data-m="' + m + '">&times;</button></span>'
+  ).join("") || '<span class="muted">관심 코인을 추가하세요.</span>';
+  $("chips").querySelectorAll("button").forEach(b => {
+    b.onclick = () => { removeCoin(b.dataset.m); };
+  });
+}
+
+function addCoin() {
+  const raw = $("addInput").value.trim();
+  if (!raw) return;
+  let market = state.marketsByName.get(raw);
+  if (!market) {
+    const mm = raw.match(/(KRW-[A-Z0-9]+)/i);
+    if (mm) market = mm[1].toUpperCase();
+  }
+  if (!market || !state.nameByMarket.has(market)) { showErr("찾을 수 없는 코인: " + raw); return; }
+  if (state.watch.includes(market)) { $("addInput").value = ""; return; }
+  state.watch.push(market);
+  $("addInput").value = "";
+  persist(); assignColors(); renderChips();
+  fetchTickers().then(rebuild).then(connectWs);
+}
+function removeCoin(m) {
+  state.watch = state.watch.filter(x => x !== m);
+  persist(); assignColors();
+  if (state.volChart) { state.volChart.destroy(); state.volChart = null; }
+  rebuild(); connectWs();
+}
+
+function buildTfBar() {
+  $("tfbar").innerHTML = Object.keys(TF).map(k =>
+    '<button data-tf="' + k + '"' + (k === state.tf ? ' class="active"' : "") + ">" + k + "</button>"
+  ).join("");
+  $("tfbar").querySelectorAll("button").forEach(b => {
+    b.onclick = () => {
+      state.tf = b.dataset.tf; persist(); buildTfBar(); rebuild();
+    };
+  });
+}
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}
+
+(async function init() {
+  restore();
+  buildTfBar();
+  assignColors();
+  renderChips();
+  try { await loadMarkets(); }
+  catch (e) { showErr("마켓 목록 로드 실패: " + e.message + " — 인터넷/서버 확인"); }
+  await fetchTickers().catch(() => {});
+  await rebuild();
+  connectWs();
+  $("addBtn").onclick = addCoin;
+  $("addInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addCoin(); });
+  $("refresh").onclick = () => { fetchTickers().then(rebuild); };
+  setInterval(() => { if (state.ws && state.ws.readyState === 1) state.ws.send("PING"); }, 60000);
+  setInterval(() => { rebuild().catch(() => {}); }, 90000);
+})();
+</script>
+</body>
+</html>
