@@ -82,11 +82,24 @@
   <span><span id="cdot" class="dot"></span> <span id="cstat" class="muted">연결 중…</span></span>
   <span class="muted" id="updated"></span>
   <span class="tf" id="tfbar" style="margin-left:auto"></span>
-  <span class="bar"><button id="refresh">새로고침</button></span>
+  <span class="bar"><button id="cfgBtn">설정</button><button id="refresh">새로고침</button></span>
 </header>
 
 <div class="wrap">
   <div id="err"></div>
+
+  <div class="card" id="cfgPanel" hidden>
+    <h2>설정</h2>
+    <p class="muted" style="margin:0 0 8px">
+      브라우저에서 업비트 API를 직접 호출하면 CORS로 차단됩니다.
+      Cloudflare Worker 프록시 주소를 넣으면 그 경유로 동작합니다. (배포법: 저장소 <code>README.md</code>)
+    </p>
+    <div class="add">
+      <input id="proxyInput" placeholder="https://coin-proxy.xxxx.workers.dev" style="width:min(360px,70vw)" />
+      <button id="proxySave">저장</button>
+    </div>
+    <p class="muted" id="proxyState" style="margin:8px 0 0"></p>
+  </div>
 
   <div class="add">
     <input id="addInput" list="mktList" placeholder="코인 이름 (예: 비트코인)" />
@@ -121,8 +134,8 @@
   </div>
 
   <p class="muted">
-    데이터: 업비트 공개 API · 시세는 WebSocket 실시간, 캔들은 90초마다 갱신 ·
-    <code>file://</code>로 열어 데이터가 안 뜨면 로컬 서버로 실행하세요.
+    데이터: 업비트 공개 API (프록시 경유) · 시세 2초 폴링, 캔들 90초 갱신 ·
+    설정에서 프록시 주소를 지정하세요.
   </p>
 </div>
 
@@ -150,12 +163,23 @@ const state = {
   base: {},                  // 마켓코드 -> 기준가
   live: {},                  // 마켓코드 -> {trade_price, signed_change_rate, acc_trade_price_24h}
   timeline: [],              // 통합 타임스탬프 배열
+  proxy: "",                 // 업비트 API 프록시 base URL (CORS 우회)
   priceChart: null,
   volTrendChart: null,
   volChart: null,
-  ws: null,
-  renderQueued: false,
+  pollTimer: null,
 };
+
+// 업비트 API 호출 base. 프록시가 설정돼 있으면 그쪽으로, 아니면 직접(로컬 전용).
+function apiBase() {
+  return state.proxy ? state.proxy.replace(/\/+$/, "") : "https://api.upbit.com";
+}
+function isLocal() {
+  return /^(localhost|127\.|\[?::1\]?$)/.test(location.hostname) || location.protocol === "file:";
+}
+function needsProxy() {
+  return !state.proxy && !isLocal();
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -191,7 +215,7 @@ function assignColors() {
 function persist() {
   try {
     localStorage.setItem("upbit-dash", JSON.stringify({
-      watch: state.watch, tf: state.tf, volMode: state.volMode,
+      watch: state.watch, tf: state.tf, volMode: state.volMode, proxy: state.proxy,
     }));
   } catch (e) {}
 }
@@ -201,11 +225,12 @@ function restore() {
     if (Array.isArray(s.watch) && s.watch.length) state.watch = s.watch;
     if (TF[s.tf]) state.tf = s.tf;
     if (s.volMode === "mult" || s.volMode === "krw") state.volMode = s.volMode;
+    if (typeof s.proxy === "string") state.proxy = s.proxy;
   } catch (e) {}
 }
 
 async function loadMarkets() {
-  const r = await fetch("https://api.upbit.com/v1/market/all?isDetails=false");
+  const r = await fetch(apiBase() + "/v1/market/all?isDetails=false");
   if (!r.ok) throw new Error("HTTP " + r.status);
   const arr = await r.json();
   const dl = $("mktList");
@@ -224,7 +249,7 @@ async function loadMarkets() {
 
 async function fetchCandles(market) {
   const tf = TF[state.tf];
-  const url = "https://api.upbit.com/v1/candles/" + tf.path + "?market=" + market + "&count=" + tf.count;
+  const url = apiBase() + "/v1/candles/" + tf.path + "?market=" + market + "&count=" + tf.count;
   const r = await fetch(url);
   if (!r.ok) throw new Error(market + " HTTP " + r.status);
   const arr = await r.json();
@@ -237,8 +262,8 @@ async function fetchCandles(market) {
 
 async function fetchTickers() {
   if (!state.watch.length) return;
-  const r = await fetch("https://api.upbit.com/v1/ticker?markets=" + state.watch.join(","));
-  if (!r.ok) return;
+  const r = await fetch(apiBase() + "/v1/ticker?markets=" + state.watch.join(","));
+  if (!r.ok) throw new Error("ticker HTTP " + r.status);
   const arr = await r.json();
   for (const t of arr) {
     state.live[t.market] = {
@@ -258,7 +283,9 @@ async function rebuild() {
     state.candles = got;
     clearErr();
   } catch (e) {
-    showErr("캔들 로드 실패: " + e.message + " — 로컬 서버로 실행 중인지 확인하세요.");
+    showErr(needsProxy()
+      ? "업비트 API 직접 호출은 CORS로 차단됩니다. [설정]에서 프록시 주소를 지정하세요."
+      : "캔들 로드 실패: " + e.message);
     return;
   }
 
@@ -456,50 +483,27 @@ function applyLive() {
   $("updated").textContent = "갱신 " + d.toLocaleTimeString("ko-KR");
 }
 
-function scheduleRender() {
-  if (state.renderQueued) return;
-  state.renderQueued = true;
-  setTimeout(() => { state.renderQueued = false; applyLive(); }, 300);
-}
-
 function setStatus(kind, text) {
   $("cdot").className = "dot " + kind;
   $("cstat").textContent = text;
 }
 
-function connectWs() {
-  if (state.ws) { try { state.ws.close(); } catch (e) {} }
+// 시세는 2초마다 REST 폴링 (WebSocket 대신 — 프록시 경유가 단순함)
+async function pollOnce() {
   if (!state.watch.length) return;
-  const ws = new WebSocket("wss://api.upbit.com/websocket/v1");
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => {
-    ws.send(JSON.stringify([
-      { ticket: "coin-dash-" + Date.now() },
-      { type: "ticker", codes: state.watch },
-      { format: "DEFAULT" },
-    ]));
-    setStatus("ok", "실시간 연결됨");
-  };
-  ws.onmessage = async (ev) => {
-    let text;
-    try {
-      text = (ev.data instanceof Blob) ? await ev.data.text() : new TextDecoder().decode(ev.data);
-    } catch (e) { return; }
-    let d;
-    try { d = JSON.parse(text); } catch (e) { return; }
-    if (d.status === "UP") return;
-    if (d.type === "ticker" && d.code) {
-      state.live[d.code] = {
-        trade_price: d.trade_price,
-        signed_change_rate: d.signed_change_rate,
-        acc_trade_price_24h: d.acc_trade_price_24h,
-      };
-      scheduleRender();
-    }
-  };
-  ws.onclose = () => { setStatus("warn", "재연결 중…"); setTimeout(connectWs, 3000); };
-  ws.onerror = () => { try { ws.close(); } catch (e) {} };
-  state.ws = ws;
+  try {
+    await fetchTickers();
+    applyLive();
+    setStatus("ok", "실시간 (2초 폴링)");
+    clearErr();
+  } catch (e) {
+    setStatus("err", "연결 오류");
+    if (needsProxy()) showErr("업비트 API 직접 호출은 CORS로 차단됩니다. [설정]에서 프록시 주소를 지정하세요.");
+  }
+}
+function startPolling() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(pollOnce, 2000);
 }
 
 function renderChips() {
@@ -525,14 +529,51 @@ function addCoin() {
   state.watch.push(market);
   $("addInput").value = "";
   persist(); assignColors(); renderChips();
-  fetchTickers().then(rebuild).then(connectWs);
+  fetchTickers().then(rebuild).catch(() => {});
 }
 function removeCoin(m) {
   state.watch = state.watch.filter(x => x !== m);
   persist(); assignColors();
   if (state.volChart) { state.volChart.destroy(); state.volChart = null; }
   if (state.volTrendChart) { state.volTrendChart.destroy(); state.volTrendChart = null; }
-  rebuild(); connectWs();
+  rebuild();
+}
+
+function refreshProxyState() {
+  const el = $("proxyState");
+  if (!el) return;
+  if (state.proxy) el.textContent = "현재 프록시: " + state.proxy;
+  else if (isLocal()) el.textContent = "로컬 실행 중 — 프록시 없이 직접 호출합니다.";
+  else el.textContent = "프록시 미설정 — 데이터를 불러올 수 없습니다.";
+}
+
+function setupCfg() {
+  const panel = $("cfgPanel");
+  $("cfgBtn").onclick = () => {
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) { $("proxyInput").value = state.proxy; refreshProxyState(); }
+  };
+  $("proxySave").onclick = () => {
+    let v = $("proxyInput").value.trim();
+    if (v && !/^https?:\/\//.test(v)) v = "https://" + v;
+    state.proxy = v.replace(/\/+$/, "");
+    persist();
+    refreshProxyState();
+    clearErr();
+    setStatus("warn", "다시 불러오는 중…");
+    (async () => {
+      await loadMarkets().catch(() => {});
+      await fetchTickers().catch(() => {});
+      await rebuild();
+      renderChips();
+      startPolling();
+    })();
+  };
+  if (needsProxy()) {
+    panel.hidden = false;
+    showErr("업비트 API 직접 호출은 CORS로 차단됩니다. 아래 [설정]에서 프록시 주소를 지정하세요.");
+  }
+  refreshProxyState();
 }
 
 function buildTfBar() {
@@ -556,17 +597,20 @@ if ("serviceWorker" in navigator) {
   restore();
   buildTfBar();
   buildVolToggle();
+  setupCfg();
   assignColors();
   renderChips();
-  try { await loadMarkets(); }
-  catch (e) { showErr("마켓 목록 로드 실패: " + e.message + " — 인터넷/서버 확인"); }
-  await fetchTickers().catch(() => {});
-  await rebuild();
-  connectWs();
   $("addBtn").onclick = addCoin;
   $("addInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addCoin(); });
-  $("refresh").onclick = () => { fetchTickers().then(rebuild); };
-  setInterval(() => { if (state.ws && state.ws.readyState === 1) state.ws.send("PING"); }, 60000);
+  $("refresh").onclick = () => { fetchTickers().catch(() => {}); rebuild(); };
+
+  if (needsProxy()) { setStatus("err", "프록시 미설정"); return; }
+
+  try { await loadMarkets(); }
+  catch (e) { showErr("마켓 목록 로드 실패: " + e.message); }
+  await fetchTickers().catch(() => {});
+  await rebuild();
+  startPolling();
   setInterval(() => { rebuild().catch(() => {}); }, 90000);
 })();
 </script>
