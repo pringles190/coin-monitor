@@ -91,8 +91,8 @@
   <div class="card" id="cfgPanel" hidden>
     <h2>설정</h2>
     <p class="muted" style="margin:0 0 8px">
-      브라우저에서 업비트 API를 직접 호출하면 CORS로 차단됩니다.
-      Cloudflare Worker 프록시 주소를 넣으면 그 경유로 동작합니다. (배포법: 저장소 <code>README.md</code>)
+      기본적으로 같은 도메인의 <code>/api</code>(Cloudflare Pages Function)를 거쳐 업비트를 호출합니다.
+      별도 프록시(Worker 등)를 쓰려면 아래에 그 주소를 입력하세요. 비워두면 기본값을 사용합니다.
     </p>
     <div class="add">
       <input id="proxyInput" placeholder="https://coin-proxy.xxxx.workers.dev" style="width:min(360px,70vw)" />
@@ -134,8 +134,7 @@
   </div>
 
   <p class="muted">
-    데이터: 업비트 공개 API (프록시 경유) · 시세 2초 폴링, 캔들 90초 갱신 ·
-    설정에서 프록시 주소를 지정하세요.
+    데이터: 업비트 공개 API (<code>/api</code> 중계) · 시세 2초 폴링, 캔들 90초 갱신
   </p>
 </div>
 
@@ -170,15 +169,17 @@ const state = {
   pollTimer: null,
 };
 
-// 업비트 API 호출 base. 프록시가 설정돼 있으면 그쪽으로, 아니면 직접(로컬 전용).
+// 업비트 API 호출 base.
+//  - 설정에서 프록시 URL을 직접 넣었으면 그것
+//  - 로컬 실행이면 api.upbit.com 직접 호출
+//  - 그 외(배포)에는 같은 도메인의 /api (Cloudflare Pages Function이 업비트로 중계)
 function apiBase() {
-  return state.proxy ? state.proxy.replace(/\/+$/, "") : "https://api.upbit.com";
+  if (state.proxy) return state.proxy.replace(/\/+$/, "");
+  if (isLocal()) return "https://api.upbit.com";
+  return "/api";
 }
 function isLocal() {
   return /^(localhost|127\.|\[?::1\]?$)/.test(location.hostname) || location.protocol === "file:";
-}
-function needsProxy() {
-  return !state.proxy && !isLocal();
 }
 
 const $ = (id) => document.getElementById(id);
@@ -283,9 +284,7 @@ async function rebuild() {
     state.candles = got;
     clearErr();
   } catch (e) {
-    showErr(needsProxy()
-      ? "업비트 API 직접 호출은 CORS로 차단됩니다. [설정]에서 프록시 주소를 지정하세요."
-      : "캔들 로드 실패: " + e.message);
+    showErr("캔들 로드 실패: " + e.message + " — /api 중계가 배포됐는지 확인하세요.");
     return;
   }
 
@@ -498,7 +497,6 @@ async function pollOnce() {
     clearErr();
   } catch (e) {
     setStatus("err", "연결 오류");
-    if (needsProxy()) showErr("업비트 API 직접 호출은 CORS로 차단됩니다. [설정]에서 프록시 주소를 지정하세요.");
   }
 }
 function startPolling() {
@@ -542,9 +540,9 @@ function removeCoin(m) {
 function refreshProxyState() {
   const el = $("proxyState");
   if (!el) return;
-  if (state.proxy) el.textContent = "현재 프록시: " + state.proxy;
-  else if (isLocal()) el.textContent = "로컬 실행 중 — 프록시 없이 직접 호출합니다.";
-  else el.textContent = "프록시 미설정 — 데이터를 불러올 수 없습니다.";
+  if (state.proxy) el.textContent = "현재: 사용자 지정 프록시 (" + state.proxy + ")";
+  else if (isLocal()) el.textContent = "현재: 로컬 — api.upbit.com 직접 호출";
+  else el.textContent = "현재: /api 내장 중계 사용";
 }
 
 function setupCfg() {
@@ -569,10 +567,6 @@ function setupCfg() {
       startPolling();
     })();
   };
-  if (needsProxy()) {
-    panel.hidden = false;
-    showErr("업비트 API 직접 호출은 CORS로 차단됩니다. 아래 [설정]에서 프록시 주소를 지정하세요.");
-  }
   refreshProxyState();
 }
 
@@ -603,8 +597,6 @@ if ("serviceWorker" in navigator) {
   $("addBtn").onclick = addCoin;
   $("addInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addCoin(); });
   $("refresh").onclick = () => { fetchTickers().catch(() => {}); rebuild(); };
-
-  if (needsProxy()) { setStatus("err", "프록시 미설정"); return; }
 
   try { await loadMarkets(); }
   catch (e) { showErr("마켓 목록 로드 실패: " + e.message); }
