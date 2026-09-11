@@ -10,10 +10,19 @@
 //   /news    → 코인 뉴스 RSS 모음 (JSON)
 //   /trends  → 구글 트렌드 검색 관심도 시계열 (JSON, 비공식)
 //
-// 뉴스 AI 요약(선택): Cloudflare 대시보드 → 이 Worker → Settings → Variables 에
-//   ANTHROPIC_API_KEY = sk-ant-...   (console.anthropic.com 에서 발급)
-//   NEWS_MODEL = claude-haiku-4-5    (선택, 기본값)
-// 을 추가하면 헤드라인 대신 한국어 2문장 요약이 나온다. 없으면 발췌문만.
+// 뉴스 AI 요약(선택, 둘 중 하나만 있어도 됨 — Workers AI를 우선한다):
+//
+//  A) Cloudflare Workers AI (오픈소스 모델, 무료 한도 내에서 사실상 공짜)
+//     이 Worker → Settings → Bindings → Add → "Workers AI" 선택 →
+//     변수 이름을 정확히 AI 로 지정 → Deploy.
+//     (API 키 발급 불필요. dash.cloudflare.com에서 "Workers AI"로 검색하면 됨)
+//     선택: NEWS_MODEL 변수로 모델 교체 가능 (기본 @cf/meta/llama-3.1-8b-instruct)
+//
+//  B) Anthropic Claude (유료, 품질↑) — Settings → Variables 에
+//     ANTHROPIC_API_KEY = sk-ant-...   (console.anthropic.com 에서 발급)
+//     NEWS_MODEL = claude-haiku-4-5    (선택, 기본값)
+//
+// AI 바인딩과 키 둘 다 없으면 헤드라인 + 발췌문만 표시(요약 없이도 정상 동작).
 //
 // 구글 트렌드는 공식 API가 없어 내부 엔드포인트를 그대로 쓴다(비공식, 언제든 깨질 수 있음).
 // 요청이 몰리면 429로 막히므로 6시간 캐시 + 재시도 없음으로 최대한 아낀다.
@@ -146,9 +155,13 @@ async function handleNews(request, env) {
       coins: [],
     }));
 
-  if (env && env.ANTHROPIC_API_KEY && items.length) {
-    try { items = await summarize(items, env.ANTHROPIC_API_KEY, env.NEWS_MODEL); }
-    catch (e) { /* 요약 실패 시 발췌문 그대로 */ }
+  if (items.length && env) {
+    try {
+      if (env.AI) items = await summarizeWithWorkersAI(items, env);
+      else if (env.ANTHROPIC_API_KEY) items = await summarize(items, env.ANTHROPIC_API_KEY, env.NEWS_MODEL);
+    } catch (e) { /* 요약 실패 시 발췌문 그대로 (원인은 무시하지 않고 아래 로그에 남김) */
+      console.log("summarize failed:", (e && e.message) || e);
+    }
   }
 
   const bodyStr = JSON.stringify({ items, updated: new Date().toISOString() });
@@ -203,18 +216,38 @@ function decodeXml(s) {
 }
 function norm(t) { return t.toLowerCase().replace(/[^a-z0-9가-힣]/g, "").slice(0, 40); }
 
-async function summarize(items, apiKey, model) {
+// Claude와 Workers AI가 공유하는 프롬프트 구성
+function buildSummaryPrompt(items) {
   const list = items.map((it, i) =>
     `[${i}] (${it.source}) ${it.title}` + (it.excerpt ? `\n${it.excerpt}` : "")
   ).join("\n\n");
 
   const system =
     "너는 암호화폐 뉴스 편집자다. 각 기사를 한국어 2문장으로 사실 위주로 요약하고 " +
-    "관련 코인 티커(BTC, ETH 등)를 뽑는다. 과장 표현과 투자 권유는 절대 쓰지 않는다.";
+    "관련 코인 티커(BTC, ETH 등)를 뽑는다. 과장 표현과 투자 권유는 절대 쓰지 않는다. " +
+    "반드시 JSON 배열만 출력한다. 다른 텍스트나 설명, 마크다운 코드블록 표시는 절대 쓰지 않는다.";
   const user =
-    "다음 기사들을 요약해라. 반드시 JSON 배열만 출력한다. 다른 텍스트 금지.\n" +
+    "다음 기사들을 요약해라.\n" +
     'form: [{"i": 정수, "summary": "2문장 한국어 요약", "coins": ["BTC"]}]\n\n' + list;
 
+  return { system, user };
+}
+
+// 모델이 뱉은 텍스트에서 JSON 배열을 찾아 items에 병합
+function mergeSummaries(items, text) {
+  const s = text.indexOf("[");
+  const e = text.lastIndexOf("]");
+  if (s < 0 || e < s) return items;
+  const arr = JSON.parse(text.slice(s, e + 1));
+  const byI = new Map(arr.map((x) => [x.i, x]));
+  return items.map((it, i) => {
+    const s2 = byI.get(i);
+    return s2 ? { ...it, summary: s2.summary || "", coins: Array.isArray(s2.coins) ? s2.coins.slice(0, 4) : [] } : it;
+  });
+}
+
+async function summarize(items, apiKey, model) {
+  const { system, user } = buildSummaryPrompt(items);
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -230,16 +263,38 @@ async function summarize(items, apiKey, model) {
     }),
   });
   if (!r.ok) return items;
-
   const data = await r.json();
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
-  const json = text.slice(text.indexOf("["), text.lastIndexOf("]") + 1);
-  const arr = JSON.parse(json);
-  const byI = new Map(arr.map((x) => [x.i, x]));
-  return items.map((it, i) => {
-    const s = byI.get(i);
-    return s ? { ...it, summary: s.summary || "", coins: Array.isArray(s.coins) ? s.coins.slice(0, 4) : [] } : it;
+  return mergeSummaries(items, text);
+}
+
+// Cloudflare Workers AI (오픈소스 모델). env.AI 바인딩이 있어야 동작한다.
+// 표준 텍스트 생성 모델은 { response: "..." } 형태로 답을 준다 — 혹시 다른 모양이면
+// 아래 extractWorkersAiText 가 흔한 변형들을 최대한 방어적으로 훑는다.
+async function summarizeWithWorkersAI(items, env) {
+  const { system, user } = buildSummaryPrompt(items);
+  const model = env.NEWS_MODEL || "@cf/meta/llama-3.1-8b-instruct";
+  const result = await env.AI.run(model, {
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    max_tokens: 3000,
   });
+  const text = extractWorkersAiText(result);
+  return mergeSummaries(items, text);
+}
+function extractWorkersAiText(result) {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") return "";
+  if (typeof result.response === "string") return result.response;
+  if (result.result && typeof result.result.response === "string") return result.result.response;
+  if (Array.isArray(result.choices) && result.choices[0]) {
+    const c = result.choices[0];
+    if (c.message && typeof c.message.content === "string") return c.message.content;
+    if (typeof c.text === "string") return c.text;
+  }
+  return "";
 }
 
 // ---------- 트렌드 (구글 검색 관심도, 비공식) ----------
