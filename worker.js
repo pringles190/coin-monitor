@@ -161,11 +161,24 @@ async function handleNews(request, env) {
     }));
 
   if (items.length && env) {
-    try {
-      if (env.AI) items = await summarizeWithWorkersAI(items, env);
-      else if (env.ANTHROPIC_API_KEY) items = await summarize(items, env.ANTHROPIC_API_KEY, env.NEWS_MODEL);
-    } catch (e) { /* 요약 실패 시 발췌문 그대로 (원인은 무시하지 않고 아래 로그에 남김) */
-      console.log("summarize failed:", (e && e.message) || e);
+    if (env.AI) {
+      try {
+        items = await summarizeWithWorkersAI(items, env);
+        const done = items.filter((it) => it.summary).length;
+        console.log("workers-ai summarize ok:", done + "/" + items.length, "model=" + (env.NEWS_MODEL || "@cf/meta/llama-3.1-8b-instruct"));
+      } catch (e) {
+        console.log("workers-ai summarize failed:", (e && e.message) || e);
+      }
+    } else if (env.ANTHROPIC_API_KEY) {
+      try {
+        items = await summarize(items, env.ANTHROPIC_API_KEY, env.NEWS_MODEL);
+        const done = items.filter((it) => it.summary).length;
+        console.log("claude summarize ok:", done + "/" + items.length);
+      } catch (e) {
+        console.log("claude summarize failed:", (e && e.message) || e);
+      }
+    } else {
+      console.log("no AI binding / ANTHROPIC_API_KEY — excerpts only");
     }
   }
 
@@ -267,7 +280,7 @@ async function summarize(items, apiKey, model) {
       messages: [{ role: "user", content: user }],
     }),
   });
-  if (!r.ok) return items;
+  if (!r.ok) throw new Error("anthropic HTTP " + r.status + ": " + (await r.text()).slice(0, 200));
   const data = await r.json();
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
   return mergeSummaries(items, text);
