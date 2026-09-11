@@ -98,12 +98,17 @@ async function handleNews(request, env) {
   const origin = new URL(request.url).origin;
   const cacheKey = new Request(origin + "/__news_cache_v1");
   const cache = caches.default;
+  // ?fresh=1 이면 캐시를 건너뛰고 즉시 새로 수집+요약한다 (Workers AI/Claude 연동 테스트용).
+  // 결과는 평소처럼 다시 캐시에 저장되므로 남용해도 이후 요청엔 영향 없음.
+  const skipCache = new URL(request.url).searchParams.get("fresh") === "1";
 
-  const hit = await cache.match(cacheKey);
-  if (hit) {
-    const h = new Headers(hit.headers);
-    for (const [k, v] of Object.entries(CORS)) h.set(k, v);
-    return new Response(hit.body, { status: hit.status, headers: h });
+  if (!skipCache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) {
+      const h = new Headers(hit.headers);
+      for (const [k, v] of Object.entries(CORS)) h.set(k, v);
+      return new Response(hit.body, { status: hit.status, headers: h });
+    }
   }
 
   const now = Date.now();
