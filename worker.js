@@ -16,7 +16,7 @@
 //     이 Worker → Settings → Bindings → Add → "Workers AI" 선택 →
 //     변수 이름을 정확히 AI 로 지정 → Deploy.
 //     (API 키 발급 불필요. dash.cloudflare.com에서 "Workers AI"로 검색하면 됨)
-//     선택: NEWS_MODEL 변수로 모델 교체 가능 (기본 @cf/meta/llama-3.1-8b-instruct)
+//     선택: NEWS_MODEL 변수로 모델 교체 가능 (기본 @cf/meta/llama-3.3-70b-instruct-fp8-fast)
 //
 //  B) Anthropic Claude (유료, 품질↑) — Settings → Variables 에
 //     ANTHROPIC_API_KEY = sk-ant-...   (console.anthropic.com 에서 발급)
@@ -165,7 +165,7 @@ async function handleNews(request, env) {
       try {
         items = await summarizeWithWorkersAI(items, env);
         const done = items.filter((it) => it.summary).length;
-        console.log("workers-ai summarize ok:", done + "/" + items.length, "model=" + (env.NEWS_MODEL || "@cf/meta/llama-3.1-8b-instruct"));
+        console.log("workers-ai summarize ok:", done + "/" + items.length, "model=" + (env.NEWS_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast"));
       } catch (e) {
         console.log("workers-ai summarize failed:", (e && e.message) || e);
       }
@@ -291,7 +291,7 @@ async function summarize(items, apiKey, model) {
 // 아래 extractWorkersAiText 가 흔한 변형들을 최대한 방어적으로 훑는다.
 async function summarizeWithWorkersAI(items, env) {
   const { system, user } = buildSummaryPrompt(items);
-  const model = env.NEWS_MODEL || "@cf/meta/llama-3.1-8b-instruct";
+  const model = env.NEWS_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
   const result = await env.AI.run(model, {
     messages: [
       { role: "system", content: system },

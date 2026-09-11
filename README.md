@@ -46,7 +46,7 @@ Cointelegraph·CoinDesk·Decrypt·The Block·구글 뉴스(국내). 3일 이내 
 | Anthropic Claude | Settings → Variables 에 `ANTHROPIC_API_KEY`([발급](https://console.anthropic.com)) | 별도 종량 과금 (Claude Pro 구독과 무관) |
 
 둘 다 설정돼 있으면 **Workers AI를 우선** 사용한다. 모델은 `NEWS_MODEL` 변수로 바꿀 수 있음
-(Workers AI 기본값 `@cf/meta/llama-3.1-8b-instruct`, Claude 기본값 `claude-haiku-4-5`).
+(Workers AI 기본값 `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, Claude 기본값 `claude-haiku-4-5`).
 
 > Workers AI 응답 파싱은 제가 이 환경에서 직접 배포해 검증하지 못했습니다(바인딩은 실제 Worker
 > 안에서만 동작). 문서화된 표준 형식대로 짰고 흔한 변형들도 방어적으로 처리했지만, 켰는데
