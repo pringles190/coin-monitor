@@ -8,11 +8,15 @@
 // 경로:
 //   /v1/...  → api.upbit.com 중계 (시세·캔들)
 //   /news    → 코인 뉴스 RSS 모음 (JSON)
+//   /trends  → 구글 트렌드 검색 관심도 시계열 (JSON, 비공식)
 //
 // 뉴스 AI 요약(선택): Cloudflare 대시보드 → 이 Worker → Settings → Variables 에
 //   ANTHROPIC_API_KEY = sk-ant-...   (console.anthropic.com 에서 발급)
 //   NEWS_MODEL = claude-haiku-4-5    (선택, 기본값)
 // 을 추가하면 헤드라인 대신 한국어 2문장 요약이 나온다. 없으면 발췌문만.
+//
+// 구글 트렌드는 공식 API가 없어 내부 엔드포인트를 그대로 쓴다(비공식, 언제든 깨질 수 있음).
+// 요청이 몰리면 429로 막히므로 6시간 캐시 + 재시도 없음으로 최대한 아낀다.
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -29,6 +33,10 @@ export default {
 
     if (url.pathname === "/news" || url.pathname.endsWith("/news")) {
       return handleNews(request, env);
+    }
+
+    if (url.pathname === "/trends" || url.pathname.endsWith("/trends")) {
+      return handleTrends(request, env);
     }
 
     if (!url.pathname.startsWith("/v1/")) {
@@ -232,4 +240,97 @@ async function summarize(items, apiKey, model) {
     const s = byI.get(i);
     return s ? { ...it, summary: s.summary || "", coins: Array.isArray(s.coins) ? s.coins.slice(0, 4) : [] } : it;
   });
+}
+
+// ---------- 트렌드 (구글 검색 관심도, 비공식) ----------
+
+const TRENDS_TF = { "1M": "today 1-m", "3M": "today 3-m", "12M": "today 12-m" };
+
+function jsonResp(obj, status, extraHeaders) {
+  const h = new Headers(CORS);
+  h.set("Content-Type", "application/json");
+  if (extraHeaders) for (const [k, v] of Object.entries(extraHeaders)) h.set(k, v);
+  return new Response(JSON.stringify(obj), { status: status || 200, headers: h });
+}
+
+async function handleTrends(request, env) {
+  const url = new URL(request.url);
+  const geo = (url.searchParams.get("geo") || "KR").toUpperCase();
+  const tf = url.searchParams.get("tf") || "3M";
+  const time = TRENDS_TF[tf] || TRENDS_TF["3M"];
+  const keywords = (url.searchParams.get("keywords") || "")
+    .split(",").map((s) => s.trim()).filter(Boolean).slice(0, 5);
+
+  if (!keywords.length) return jsonResp({ error: "no_keywords" }, 400);
+
+  const cacheKey = new Request(
+    new URL(request.url).origin + "/__trends_cache_v1?geo=" + encodeURIComponent(geo === "WORLD" ? "" : geo) +
+    "&tf=" + tf + "&k=" + encodeURIComponent(keywords.join(","))
+  );
+  const cache = caches.default;
+  const hit = await cache.match(cacheKey);
+  if (hit) {
+    const h = new Headers(hit.headers);
+    for (const [k, v] of Object.entries(CORS)) h.set(k, v);
+    return new Response(hit.body, { status: hit.status, headers: h });
+  }
+
+  try {
+    const data = await fetchTrends(keywords, geo === "WORLD" ? "" : geo, time);
+    const payload = { ...data, geo: geo, tf, cachedAt: new Date().toISOString() };
+    const bodyStr = JSON.stringify(payload);
+    const cacheHeaders = new Headers({ "Content-Type": "application/json", "Cache-Control": "max-age=21600" }); // 6시간
+    await cache.put(cacheKey, new Response(bodyStr, { headers: cacheHeaders }));
+    return jsonResp(payload);
+  } catch (e) {
+    // 구글 트렌드는 요청이 몰리면 바로 429를 준다 — 재시도하지 않고 그대로 알림
+    return jsonResp({ error: "trends_failed", detail: String((e && e.message) || e) }, 502);
+  }
+}
+
+async function fetchTrends(keywords, geo, time) {
+  const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+  const strip = (t) => t.replace(/^\)\]\}',?\s*/, "");
+
+  // 세션 쿠키 없이 바로 explore를 부르면 거의 항상 429가 난다.
+  const pre = await fetch("https://trends.google.com/?geo=" + encodeURIComponent(geo || "US"), {
+    headers: { "User-Agent": UA },
+  });
+  const rawCookies = pre.headers.getSetCookie
+    ? pre.headers.getSetCookie()
+    : (pre.headers.get("set-cookie") ? [pre.headers.get("set-cookie")] : []);
+  const cookie = rawCookies.map((c) => c.split(";")[0]).join("; ");
+
+  const exploreReq = {
+    comparisonItem: keywords.map((k) => ({ keyword: k, geo: geo || "", time })),
+    category: 0,
+    property: "",
+  };
+  const exploreUrl = "https://trends.google.com/trends/api/explore?hl=ko&tz=-540&req=" +
+    encodeURIComponent(JSON.stringify(exploreReq));
+  const r1 = await fetch(exploreUrl, {
+    headers: { "User-Agent": UA, Accept: "application/json", Cookie: cookie },
+  });
+  if (!r1.ok) throw new Error("explore HTTP " + r1.status);
+  const explore = JSON.parse(strip(await r1.text()));
+  const widget = (explore.widgets || []).find((w) => w.id === "TIMESERIES");
+  if (!widget) throw new Error("TIMESERIES 위젯 없음");
+
+  const multiUrl = "https://trends.google.com/trends/api/widgetdata/multiline?hl=ko&tz=-540&req=" +
+    encodeURIComponent(JSON.stringify(widget.request)) + "&token=" + encodeURIComponent(widget.token);
+  const r2 = await fetch(multiUrl, {
+    headers: { "User-Agent": UA, Accept: "application/json", Cookie: cookie },
+  });
+  if (!r2.ok) throw new Error("multiline HTTP " + r2.status);
+  const multi = JSON.parse(strip(await r2.text()));
+  const timeline = (multi.default && multi.default.timelineData) || [];
+
+  const series = timeline.map((row) => ({
+    t: Number(row.time) * 1000,
+    label: row.formattedAxisTime || row.formattedTime || "",
+    values: Array.isArray(row.value) ? row.value : [],
+    partial: !!row.isPartial,
+  }));
+
+  return { keywords, series, updated: new Date().toISOString() };
 }

@@ -4,6 +4,7 @@
 
 - **대시보드**: 가격 변동률 + 거래량 추이(코인별 비교), 시세 2초 폴링, 캔들 90초 갱신
 - **뉴스**: 국내·해외 암호화폐 뉴스 모음 (RSS, 15분 캐시). API 키가 있으면 AI 2문장 요약
+- **관심도**: 구글 검색 관심도(Google Trends, 비공식) 시계열 — 관심 코인 최대 5개 비교
 - 관심 코인 추가/삭제, 기간 전환(1H/4H/1D/1W/1M), 다크/라이트 자동
 - PWA: 폰에서 "홈 화면에 추가" → 앱처럼 전체화면 실행
 
@@ -42,6 +43,20 @@ Cointelegraph·CoinDesk·Decrypt·The Block·구글 뉴스(국내). 3일 이내 
   비용은 [Anthropic API](https://console.anthropic.com) 별도 과금 (Claude Pro 구독과 무관).
   Haiku + 15분 캐시 기준 실제 열람량에 따라 하루 수십~수백 원 수준.
 
+## 관심도 페이지 (구글 트렌드)
+
+`/trends` 엔드포인트가 [구글 트렌드](https://trends.google.com)의 비공식 내부 API를
+그대로 호출해 0~100 검색 관심도 시계열을 돌려준다(관심 코인 최대 5개, 구간 내 최고점=100
+기준 상대 비교). 국내/전세계, 1·3·12개월 토글 가능.
+
+- **공식 API가 없다.** pytrends류가 쓰는 비공식 엔드포인트라 언제든 바뀌거나 막힐 수 있음.
+- **구글이 요청을 자주 429로 막는다.** 특히 짧은 시간에 몰리면. 그래서:
+  - 첫 호출 시 세션 쿠키를 먼저 받아온 뒤 요청 (없으면 거의 항상 429)
+  - 응답을 **6시간** 캐시 — 같은 코인 조합·지역·기간이면 재요청 안 함
+  - 실패해도 자동 재시도하지 않음(더 막히는 걸 방지). 실패하면 잠시 후 수동 새로고침
+- **현재 구현: `worker.js`만.** Pages/Deno/Vercel용은 없음.
+- 키워드는 업비트 한글 코인명을 그대로 구글에 검색한 값 (예: "비트코인", "이더리움").
+
 ## 로컬 실행
 
 ```bash
@@ -57,7 +72,7 @@ python -m http.server 8777
 | `functions/api/[[path]].js` | Cloudflare Pages Function 프록시 |
 | `main.ts` | Deno Deploy 엔트리포인트 (정적 + 프록시) |
 | `api/[...path].js` | Vercel Serverless Function 프록시 |
-| `worker.js` | 독립형 Cloudflare Worker 프록시 + `/news` (뉴스 모음·AI 요약) |
+| `worker.js` | 독립형 Cloudflare Worker 프록시 + `/news`(뉴스) + `/trends`(구글 관심도) |
 | `manifest.webmanifest`, `sw.js`, `icon-*.png` | PWA |
 
 ## 참고

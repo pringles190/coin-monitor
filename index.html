@@ -119,6 +119,7 @@
   <span class="nav" id="nav">
     <button data-v="dash" class="active">대시보드</button>
     <button data-v="news">뉴스</button>
+    <button data-v="trends">관심도</button>
   </span>
   <span><span id="cdot" class="dot"></span> <span id="cstat" class="muted">연결 중…</span></span>
   <span class="muted" id="updated"></span>
@@ -193,6 +194,37 @@
       출처: Google 뉴스 · Cointelegraph RSS · 15분 캐시
     </p>
   </div>
+
+  <div id="trendsView" hidden>
+    <div class="card">
+      <h2>
+        구글 검색 관심도
+        <span class="seg" id="trendsGeoToggle"></span>
+        <span class="seg" id="trendsTfToggle"></span>
+      </h2>
+      <p class="muted" style="margin:0 0 8px">
+        각 코인 이름을 구글에서 얼마나 검색했는지, 0~100 지수로 비교합니다(구간 내 최고점=100).
+        구글 비공식 엔드포인트라 가끔 응답이 안 올 수 있어요 — 그럴 땐 잠시 후 새로고침하세요.
+      </p>
+      <p class="muted" id="trendsMsg" hidden></p>
+      <div class="chartbox" id="trendsChartBox"><canvas id="trendsChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th class="name">코인</th><th>현재</th><th>구간 평균</th><th>구간 최고</th></tr></thead>
+          <tbody id="trendsTbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin:6px 2px;">
+      <span class="muted" id="trendsUpdated"></span>
+      <span class="bar"><button id="trendsRefresh">새로고침</button></span>
+    </div>
+    <p class="muted">
+      출처: Google 트렌드(비공식) · 관심 코인 최대 5개까지 비교 · 6시간 캐시
+    </p>
+  </div>
 </div>
 
 <script>
@@ -220,9 +252,12 @@ const state = {
   live: {},                  // 마켓코드 -> {trade_price, signed_change_rate, acc_trade_price_24h}
   timeline: [],              // 통합 타임스탬프 배열
   proxy: "",                 // 업비트 API 프록시 base URL (CORS 우회)
+  trendsGeo: "KR",           // 관심도 지역: "KR" | "WORLD"
+  trendsTf: "3M",            // 관심도 기간: "1M" | "3M" | "12M"
   priceChart: null,
   volTrendChart: null,
   volChart: null,
+  trendsChart: null,
   pollTimer: null,
 };
 
@@ -289,6 +324,7 @@ function persist() {
   try {
     localStorage.setItem("upbit-dash", JSON.stringify({
       watch: state.watch, tf: state.tf, volMode: state.volMode, proxy: state.proxy,
+      trendsGeo: state.trendsGeo, trendsTf: state.trendsTf,
     }));
   } catch (e) {}
 }
@@ -299,6 +335,8 @@ function restore() {
     if (TF[s.tf]) state.tf = s.tf;
     if (s.volMode === "mult" || s.volMode === "krw") state.volMode = s.volMode;
     if (typeof s.proxy === "string") state.proxy = s.proxy;
+    if (s.trendsGeo === "KR" || s.trendsGeo === "WORLD") state.trendsGeo = s.trendsGeo;
+    if (["1M", "3M", "12M"].includes(s.trendsTf)) state.trendsTf = s.trendsTf;
   } catch (e) {}
 }
 
@@ -725,10 +763,133 @@ async function loadNews(force) {
     $("newsRefresh").disabled = false;
   }
 }
+// ---------- 관심도 (구글 트렌드, 비공식) ----------
+const trends = { data: null, markets: [], cacheKey: "", updated: 0, loading: false };
+
+function trendsUrl(keywords, geo, tf) {
+  const path = "/trends?keywords=" + encodeURIComponent(keywords.join(",")) +
+    "&geo=" + encodeURIComponent(geo) + "&tf=" + encodeURIComponent(tf);
+  if (state.proxy) return state.proxy.replace(/\/+$/, "") + path;
+  if (isLocal()) return null; // 구글 세션 쿠키가 필요해 로컬 직접 호출은 막혀 있음
+  return location.origin + "/api" + path;
+}
+// i번째 키워드에 해당하는 마켓코드(요청 시점 기준, trends.markets)로 색을 찾는다.
+// nameOf()로 이름→마켓 역매핑을 하면 한글/영문 이름이 로딩 시점에 따라 달라져 어긋날 수 있어 피한다.
+function colorForIndex(i) {
+  const m = trends.markets[i];
+  return m && state.color[m] ? state.color[m] : "#8b93a1";
+}
+function showTrendsMsg(msg) {
+  $("trendsMsg").textContent = msg;
+  $("trendsMsg").hidden = false;
+  $("trendsChartBox").hidden = true;
+}
+function hideTrendsMsg() {
+  $("trendsMsg").hidden = true;
+  $("trendsChartBox").hidden = false;
+}
+function buildTrendsToggles() {
+  const geoOpts = [["KR", "국내"], ["WORLD", "전세계"]];
+  $("trendsGeoToggle").innerHTML = geoOpts.map(([k, t]) =>
+    '<button data-geo="' + k + '"' + (k === state.trendsGeo ? ' class="active"' : "") + ">" + t + "</button>"
+  ).join("");
+  $("trendsGeoToggle").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => { state.trendsGeo = b.dataset.geo; persist(); buildTrendsToggles(); loadTrends(true); };
+  });
+
+  const tfOpts = [["1M", "1개월"], ["3M", "3개월"], ["12M", "12개월"]];
+  $("trendsTfToggle").innerHTML = tfOpts.map(([k, t]) =>
+    '<button data-tf="' + k + '"' + (k === state.trendsTf ? ' class="active"' : "") + ">" + t + "</button>"
+  ).join("");
+  $("trendsTfToggle").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => { state.trendsTf = b.dataset.tf; persist(); buildTrendsToggles(); loadTrends(true); };
+  });
+}
+function renderTrendsTable() {
+  const d = trends.data;
+  $("trendsTbody").innerHTML = d.keywords.map((kw, i) => {
+    const vals = d.series.map((row) => row.values[i]).filter((v) => v != null);
+    const cur = vals.length ? vals[vals.length - 1] : null;
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    const max = vals.length ? Math.max(...vals) : null;
+    return "<tr><td class=\"name\"><span class=\"cdot\" style=\"display:inline-block;width:9px;height:9px;border-radius:50%;background:" +
+      colorForIndex(i) + ";margin-right:6px\"></span>" + esc(kw) + "</td>" +
+      "<td>" + (cur == null ? "-" : cur) + "</td>" +
+      "<td>" + (avg == null ? "-" : avg.toFixed(1)) + "</td>" +
+      "<td>" + (max == null ? "-" : max) + "</td></tr>";
+  }).join("");
+}
+function renderTrends() {
+  const d = trends.data;
+  if (!d || !d.series.length) { showTrendsMsg("표시할 데이터가 없습니다."); return; }
+  hideTrendsMsg();
+  const labels = d.series.map((row) => row.label);
+  const datasets = d.keywords.map((kw, i) => ({
+    label: kw,
+    data: d.series.map((row) => (row.values[i] != null ? row.values[i] : null)),
+    borderColor: colorForIndex(i), backgroundColor: "transparent",
+    borderWidth: 2, pointRadius: 0, tension: 0.15, spanGaps: true,
+  }));
+
+  if (state.trendsChart) state.trendsChart.destroy();
+  state.trendsChart = new Chart($("trendsChart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: true, position: "bottom", labels: { color: tickColor(), boxWidth: 10, font: { size: 11 } } },
+        tooltip: { callbacks: { label: (c) => c.dataset.label + ": " + (c.parsed.y == null ? "-" : c.parsed.y) } },
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8, color: tickColor() }, grid: { color: gridColor() } },
+        y: { min: 0, max: 100, ticks: { color: tickColor() }, grid: { color: gridColor() } },
+      },
+    },
+  });
+  renderTrendsTable();
+  $("trendsUpdated").textContent = trends.updated ? "갱신 " + new Date(trends.updated).toLocaleTimeString("ko-KR") : "";
+}
+async function loadTrends(force) {
+  if (!state.watch.length) { showTrendsMsg("관심 코인을 먼저 추가하세요."); return; }
+  const markets = state.watch.slice(0, 5);
+  const keywords = markets.map(nameOf);
+  const url = trendsUrl(keywords, state.trendsGeo, state.trendsTf);
+  if (!url) { showTrendsMsg("관심도는 배포(프록시) 환경에서 동작합니다. [설정]에서 프록시 주소를 넣으세요."); return; }
+  if (trends.loading) return;
+
+  const cacheKey = markets.join(",") + "|" + state.trendsGeo + "|" + state.trendsTf;
+  if (!force && trends.data && trends.cacheKey === cacheKey && Date.now() - trends.updated < 1800000) {
+    renderTrends(); return;
+  }
+  trends.loading = true;
+  $("trendsRefresh").disabled = true;
+  if (!trends.data) showTrendsMsg("불러오는 중…");
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+    trends.data = d;
+    trends.markets = markets;
+    trends.cacheKey = cacheKey;
+    trends.updated = Date.now();
+    renderTrends();
+  } catch (e) {
+    if (!trends.data) {
+      showTrendsMsg("관심도를 불러오지 못했습니다. 구글 트렌드가 요청을 일시적으로 막았을 수 있어요 — 잠시 후 새로고침 해보세요.");
+    }
+  } finally {
+    trends.loading = false;
+    $("trendsRefresh").disabled = false;
+  }
+}
+
 function setView(v) {
-  if (v !== "news") v = "dash";
+  if (v !== "news" && v !== "trends") v = "dash";
   $("dashView").hidden = v !== "dash";
   $("newsView").hidden = v !== "news";
+  $("trendsView").hidden = v !== "trends";
   $("tfbar").style.display = v === "dash" ? "" : "none";
   $("refresh").style.display = v === "dash" ? "" : "none";
   $("updated").style.display = v === "dash" ? "" : "none";
@@ -736,12 +897,15 @@ function setView(v) {
     b.classList.toggle("active", b.dataset.v === v));
   try { localStorage.setItem("upbit-dash-view", v); } catch (e) {}
   if (v === "news") loadNews(false);
+  if (v === "trends") loadTrends(false);
 }
 function setupNav() {
   document.querySelectorAll("#nav button").forEach((b) => {
     b.onclick = () => setView(b.dataset.v);
   });
   $("newsRefresh").onclick = () => loadNews(true);
+  buildTrendsToggles();
+  $("trendsRefresh").onclick = () => loadTrends(true);
   let v = "dash";
   try { v = localStorage.getItem("upbit-dash-view") || "dash"; } catch (e) {}
   setView(v);
@@ -758,9 +922,9 @@ if ("serviceWorker" in navigator) {
   buildTfBar();
   buildVolToggle();
   setupCfg();
-  setupNav();
   assignColors();
   renderChips();
+  setupNav();
   $("addBtn").onclick = addCoin;
   $("addInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addCoin(); });
   $("refresh").onclick = () => { fetchTickers().catch(() => {}); rebuild(); };
